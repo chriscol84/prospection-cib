@@ -5,7 +5,7 @@ import google.generativeai as genai
 import json
 
 # 1. Configuration de la page
-st.set_page_config(page_title="Prospection Christophe", layout="wide", page_icon="💼")
+st.set_page_config(page_title="CRM Prospection Christophe", layout="wide", page_icon="💼")
 
 # 2. Initialisation de l'IA Gemini 2.0
 model = None
@@ -16,122 +16,125 @@ if "GEMINI_API_KEY" in st.secrets:
     except Exception as e:
         st.error(f"Erreur configuration IA : {e}")
 
-# 3. Connexion aux données
+# 3. Connexion aux données Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=60)
 def load_data():
+    # Lecture de l'onglet "Prospection"
     df = conn.read(worksheet="Prospection")
-    # Nettoyage crucial des noms de colonnes (enlève les espaces invisibles)
+    # Nettoyage des noms de colonnes pour éviter les espaces invisibles
     df.columns = [str(c).strip() for c in df.columns]
     return df.fillna("")
 
 df = load_data()
 
-# 4. Identification dynamique de la colonne "Nom"
-# On cherche le nom exact ou une variante pour éviter le KeyError
-potential_names = ["Nom (FR) (Dénomination sociale)", "Nom", "Entreprise", "Dénomination sociale"]
-nom_col = next((name for name in potential_names if name in df.columns), None)
+# 4. Identification de la colonne Nom (Basé sur votre liste réelle)
+nom_col = "Nom de l'entité"
 
-if not nom_col:
-    st.error("❌ Erreur : Colonne de nom introuvable.")
-    st.write("Colonnes détectées dans votre Google Sheet :", df.columns.tolist())
+if nom_col not in df.columns:
+    st.error(f"❌ La colonne '{nom_col}' est introuvable.")
+    st.write("Colonnes détectées :", df.columns.tolist())
     st.stop()
 
-# --- INTERFACE ---
-st.title("🚀 CRM Prospection Christophe")
+# --- INTERFACE PRINCIPALE ---
+st.title("🚀 CRM Intelligence CIB - Prospection Christophe")
 
-# Recherche latérale
+# Sidebar pour la recherche
 search = st.sidebar.text_input(f"🔍 Rechercher une société", "")
 mask = df[nom_col].str.contains(search, case=False, na=False)
 filtered_df = df[mask]
 
-# Affichage du tableau principal (Colonnes clés)
-cols_vue = [nom_col, "Priorité (P1-P3)", "Secteur & Segment", "CA (M€)", "Angle d'Attaque"]
-# On ne garde que les colonnes qui existent réellement pour éviter les erreurs
-cols_existantes = [c for c in cols_vue if c in df.columns]
+# Affichage du tableau principal (Vue synthétique)
+cols_a_afficher = [nom_col, "Priorité", "Statut Follow-up", "Secteur", "CA (M€)"]
+# Vérification que ces colonnes existent avant affichage
+cols_existantes = [c for c in cols_a_afficher if c in df.columns]
 st.dataframe(filtered_df[cols_existantes], use_container_width=True, hide_index=True)
 
 if not filtered_df.empty:
     st.divider()
-    selected_company = st.selectbox("🎯 Sélectionner une société pour action :", filtered_df[nom_col].tolist())
+    
+    # Sélection de la société cible
+    selected_company = st.selectbox("🎯 Action sur la société :", filtered_df[nom_col].tolist())
     idx = df[df[nom_col] == selected_company].index[0]
     row = df.loc[idx]
 
-    # --- SECTION 1 : MODIFICATION MANUELLE ---
-    st.subheader("📝 Mise à jour manuelle")
+    # --- SECTION 1 : MISE À JOUR MANUELLE (LE RESTE DES 30 LIGNES) ---
+    st.subheader("📝 Suivi Commercial & Commentaires")
     col_ed1, col_ed2 = st.columns(2)
     
     with col_ed1:
-        # On essaie de récupérer la valeur actuelle de priorité
-        val_priorite = str(row.get("Priorité (P1-P3)", "P3"))
-        options_prio = ["P1", "P2", "P3"]
-        idx_prio = options_prio.index(val_priorite) if val_priorite in options_prio else 2
+        options_statut = ["À contacter", "Appelé", "RDV fixé", "En cours", "Closing", "Perdu", "Client"]
+        val_actuelle = str(row.get("Statut Follow-up", "À contacter"))
+        idx_statut = options_statut.index(val_actuelle) if val_actuelle in options_statut else 0
         
-        nouvelle_prio = st.selectbox("Priorité (P1 = Décision Benelux + Actu) :", options_prio, index=idx_prio)
+        nouveau_statut = st.selectbox("Statut Follow-up :", options_statut, index=idx_statut)
+        nouvelle_prio = st.selectbox("Priorité (P1-P3) :", ["P1", "P2", "P3"], 
+                                     index=["P1", "P2", "P3"].index(str(row.get("Priorité", "P3"))))
 
     with col_ed2:
-        nouvelle_accroche = st.text_area("Accroche Personnalisée / Commentaires :", value=str(row.get("Accroche Personnalisée", "")))
+        nouveau_com = st.text_area("Commentaires / Notes de suivi :", value=str(row.get("Commentaires", "")))
 
-    if st.button("💾 Enregistrer les modifications"):
-        df.at[idx, "Priorité (P1-P3)"] = nouvelle_prio
-        df.at[idx, "Accroche Personnalisée"] = nouvelle_accroche
+    if st.button("💾 Enregistrer les modifications manuelles"):
+        df.at[idx, "Statut Follow-up"] = nouveau_statut
+        df.at[idx, "Priorité"] = nouvelle_prio
+        df.at[idx, "Commentaires"] = nouveau_com
         conn.update(worksheet="Prospection", data=df)
-        st.success("✅ Modifications enregistrées dans Google Sheets !")
+        st.success("✅ Données manuelles sauvegardées !")
         st.rerun()
 
     # --- SECTION 2 : ENRICHISSEMENT IA ---
     st.divider()
-    st.subheader("🤖 Intelligence Artificielle (Gemini 2.0)")
+    st.subheader("🤖 Intelligence Artificielle (Analyse Stratégique)")
     
     if st.button(f"🚀 Lancer l'analyse experte pour {selected_company}"):
         if model is None:
             st.error("L'IA n'est pas configurée.")
         else:
-            with st.spinner("Analyse en cours..."):
+            with st.spinner("Analyse approfondie en cours..."):
                 prompt = f"""
-                Analyse la société {selected_company} (Secteur: {row.get('Secteur & Segment', 'N/A')}).
-                Tu es un expert financier. Ne donne des infos que si tu es CERTAIN (données 2025-2026).
-                Mets à jour :
-                1. Controverses (ESG) : Risques récents.
-                2. Dernière Actualité : M&A, levée de fonds, news stratégique.
-                3. Angle d'Attaque : Trade Finance, Refi, ou Acquisition Finance.
-                4. Potentiel Croissance : Score de 1 à 10.
-                
-                Réponds UNIQUEMENT en JSON :
-                {{"esg": "...", "actu": "...", "angle": "...", "score": "..."}}
+                Tu es un analyste CIB expert. Analyse {selected_company} (Secteur: {row.get('Secteur', 'N/A')}).
+                Focus : Trade Finance, Cash Management, M&A.
+                Réponds EXCLUSIVEMENT en JSON avec ces clés : 
+                'esg' (synthèse), 'actu' (news 2025-26), 'angle' (conseil approche), 'score' (potentiel 1-5).
                 """
                 try:
                     response = model.generate_content(prompt)
-                    data_ai = json.loads(response.text.replace('```json', '').replace('```', '').strip())
+                    res = json.loads(response.text.replace('```json', '').replace('```', '').strip())
                     
                     # Mise à jour des colonnes qualitatives
-                    if "Controverses (ESG)" in df.columns: df.at[idx, "Controverses (ESG)"] = data_ai['esg']
-                    if "Dernière Actualité" in df.columns: df.at[idx, "Dernière Actualité"] = data_ai['actu']
-                    if "Angle d'Attaque" in df.columns: df.at[idx, "Angle d'Attaque"] = data_ai['angle']
-                    if "Potentiel Croissance" in df.columns: df.at[idx, "Potentiel Croissance"] = data_ai['score']
+                    df.at[idx, "Stratégie ESG"] = res['esg']
+                    df.at[idx, "Actualité Récente"] = res['actu']
+                    df.at[idx, "Angle d'Attaque"] = res['angle']
+                    df.at[idx, "Potentiel (1-5)"] = res['score']
                     
                     conn.update(worksheet="Prospection", data=df)
-                    st.success("✅ IA : Données enrichies et sauvegardées !")
+                    st.success("✅ Analyse IA intégrée au Google Sheet !")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erreur IA : {e}")
 
-    # --- SECTION 3 : FICHE DE SYNTHÈSE (LISIBILITÉ) ---
+    # --- SECTION 3 : FICHE DE SYNTHÈSE VISUELLE (LES 30 LIGNES SUPPLÉMENTAIRES) ---
     st.divider()
-    st.subheader(f"🔍 Synthèse Lisible : {selected_company}")
+    st.subheader(f"🔍 Fiche Qualitative : {selected_company}")
     
     s1, s2, s3 = st.columns(3)
     with s1:
-        st.write("**💰 Finances**")
-        st.write(f"- CA : {row.get('CA (M€)', 'N/A')} M€")
-        st.write(f"- EBITDA : {row.get('EBITDA (M€)', 'N/A')} M€")
-        st.write(f"- Trésorerie : {row.get('Trésorerie (M€)', 'N/A')} M€")
+        st.markdown("### 💰 Données Financières")
+        st.write(f"**CA :** {row.get('CA (M€)', 'N/A')} M€")
+        st.write(f"**EBITDA :** {row.get('EBITDA (M€)', 'N/A')} M€")
+        st.write(f"**Dette Nette :** {row.get('Dette Nette (M€)', 'N/A')} M€")
+        st.write(f"**Trésorerie :** {row.get('Trésorerie (M€)', 'N/A')} M€")
+
     with s2:
-        st.write("**🛡️ ESG & Risques**")
-        st.write(f"- Controverses : {row.get('Controverses (ESG)', 'RAS')}")
-        st.write(f"- Statut : {row.get('Cotée / Non Cotée', 'N/A')}")
+        st.markdown("### 🌍 Stratégie & ESG")
+        st.write(f"**Secteur :** {row.get('Secteur', 'N/A')}")
+        st.write(f"**Siège :** {row.get('Siège de Décision', 'N/A')}")
+        st.info(f"**ESG :** {row.get('Stratégie ESG', 'Non analysé')}")
+        st.error(f"**Controverses :** {row.get('Controverses', 'RAS')}")
+
     with s3:
-        st.write("**🎯 Stratégie**")
-        st.write(f"- Angle : {row.get('Angle d\'Attaque', 'À définir')}")
-        st.write(f"- News : {row.get('Dernière Actualité', 'Aucune news récente')}")
+        st.markdown("### 🎯 Approche Commerciale")
+        st.success(f"**Angle d'Attaque :** {row.get('Angle d\'Attaque', 'À définir')}")
+        st.write(f"**Dernière Actu :** {row.get('Actualité Récente', 'Aucune news')}")
+        st.write(f"**Potentiel :** ⭐ {row.get('Potentiel (1-5)', '0')}/5")
