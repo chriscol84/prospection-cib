@@ -16,7 +16,7 @@ selected_model_name = "Recherche de modèle..."
 if "GEMINI_API_KEY" in st.secrets:
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        # On scanne les modèles disponibles pour TA clé
+        # Scanner les modèles disponibles pour votre clé spécifique
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         
         if available_models:
@@ -34,8 +34,9 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=60)
 def load_data():
+    # Lecture de l'onglet "Prospection"
     df = conn.read(worksheet="Prospection")
-    # Nettoyage des noms de colonnes (enlève les espaces invisibles)
+    # Nettoyage des noms de colonnes
     df.columns = [str(c).strip() for c in df.columns]
     return df.fillna("")
 
@@ -78,23 +79,27 @@ if not filtered_df.empty:
     col_ed1, col_ed2 = st.columns(2)
     
     with col_ed1:
+        # GESTION SÉCURISÉE DU STATUT
         options_statut = ["À contacter", "Appelé", "RDV fixé", "En cours", "Closing", "Perdu", "Client"]
-        val_statut = str(row.get("Statut Follow-up", "À contacter"))
+        val_statut = str(row.get("Statut Follow-up", "")).strip()
         idx_s = options_statut.index(val_statut) if val_statut in options_statut else 0
         nouveau_statut = st.selectbox("Statut Follow-up :", options_statut, index=idx_s)
         
-        n_prio = st.selectbox("Priorité :", ["P1", "P2", "P3"], 
-                              index=["P1", "P2", "P3"].index(str(row.get("Priorité", "P3"))))
+        # GESTION SÉCURISÉE DE LA PRIORITÉ (Correction du ValueError)
+        options_prio = ["P1", "P2", "P3"]
+        val_prio = str(row.get("Priorité", "")).strip().upper()
+        idx_p = options_prio.index(val_prio) if val_prio in options_prio else 2 # P3 par défaut
+        nouveau_prio = st.selectbox("Priorité (P1-P3) :", options_prio, index=idx_p)
 
     with col_ed2:
         nouveau_com = st.text_area("Notes de suivi / Commentaires :", value=str(row.get("Commentaires", "")))
 
     if st.button("💾 Enregistrer manuellement"):
         df.at[idx, "Statut Follow-up"] = nouveau_statut
-        df.at[idx, "Priorité"] = n_prio
+        df.at[idx, "Priorité"] = nouveau_prio
         df.at[idx, "Commentaires"] = nouveau_com
         conn.update(worksheet="Prospection", data=df)
-        st.success("✅ Données sauvegardées !")
+        st.success("✅ Données sauvegardées dans Google Sheets !")
         st.rerun()
 
     # --- SECTION 2 : ENRICHISSEMENT IA (SÉCURITÉ 6 RPM) ---
@@ -113,14 +118,14 @@ if not filtered_df.empty:
         else:
             with st.spinner(f"Analyse avec {selected_model_name}..."):
                 st.session_state.last_request_time = datetime.now()
-                prompt = f"Expert CIB. Analyse {selected_company}. JSON: {{'esg': '...', 'actu': '...', 'angle': '...', 'score': 1-5}}"
+                prompt = f"Expert CIB. Analyse {selected_company}. Réponds en JSON: {{'esg': '...', 'actu': '...', 'angle': '...', 'score': 1-5}}"
                 try:
                     response = model.generate_content(prompt)
-                    # Extraction JSON
+                    # Extraction JSON robuste
                     raw_txt = response.text
                     res = json.loads(raw_txt[raw_txt.find('{'):raw_txt.rfind('}')+1])
                     
-                    # Mise à jour des colonnes qualitatives
+                    # Mise à jour des colonnes
                     df.at[idx, "Stratégie ESG"] = res.get('esg', '')
                     df.at[idx, "Actualité Récente"] = res.get('actu', '')
                     df.at[idx, "Angle d'Attaque"] = res.get('angle', '')
@@ -148,11 +153,10 @@ if not filtered_df.empty:
         st.markdown("### 🌍 Stratégie & ESG")
         st.write(f"**Secteur :** {row.get('Secteur', 'N/A')}")
         st.info(f"**ESG :** {row.get('Stratégie ESG', 'Non analysé')}")
-        st.error(f"**Controverses :** {row.get('Controverses', 'RAS / Aucune')}")
+        st.error(f"**Controverses :** {row.get('Controverses', 'RAS')}")
 
     with s3:
         st.markdown("### 🎯 Approche")
         st.success(f"**Angle :** {row.get('Angle d\'Attaque', 'À définir')}")
         st.write(f"**Actualité :** {row.get('Actualité Récente', 'N/A')}")
         st.write(f"**Potentiel :** ⭐ {row.get('Potentiel (1-5)', '0')}/5")
-        st.write(f"**Maison Mère :** {row.get('Maison Mère (Groupe)', 'N/A')}")
