@@ -4,155 +4,203 @@ import pandas as pd
 import google.generativeai as genai
 import json
 import time
+import re
 from datetime import datetime, timedelta
 
-# --- 1. CONFIGURATION ---
-st.set_page_config(page_title="CRM CIB Christophe", layout="wide", page_icon="💼")
+# --- 1. CONFIGURATION DE LA PAGE ---
+st.set_page_config(
+    page_title="CRM Prospection Christophe", 
+    layout="wide", 
+    page_icon="💼"
+)
 
-# --- 2. IA & DEEP SEARCH (GROUNDING) ---
+# --- 2. INITIALISATION IA AVEC GROUNDING (RECHERCHE WEB) ---
 model = None
-selected_model_name = "Scan du compte..."
+selected_model = "Recherche de moteur..."
 
 if "GEMINI_API_KEY" in st.secrets:
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        # Détection automatique du modèle (2.0 Flash ou 1.5 Flash)
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if models:
             best_m = next((m for m in models if "2.0" in m or "1.5" in m), models[0])
-            # ACTIVATION DE LA RECHERCHE GOOGLE
+            # ACTIVATION DU DEEP SEARCH (Google Search Grounding)
             model = genai.GenerativeModel(
                 model_name=best_m,
                 tools=[{"google_search_retrieval": {}}] 
             )
-            selected_model_name = best_m
+            selected_model = best_m
     except Exception as e:
-        st.error(f"Erreur API : {e}")
+        st.error(f"Erreur API Google : {e}")
 
-# --- 3. CHARGEMENT & DÉTECTION INTELLIGENTE ---
+# --- 3. CHARGEMENT ET DÉTECTION DYNAMIQUE DES COLONNES ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=15)
 def load_data():
     data = conn.read(worksheet="Prospection")
-    # Nettoyage radical des colonnes (minuscules, sans espaces, sans parenthèses)
+    # On nettoie juste les espaces blancs aux extrémités des noms de colonnes
     data.columns = [str(c).strip() for c in data.columns]
     return data.fillna("")
 
 df = load_data()
 
-# FONCTION POUR TROUVER UNE COLONNE SANS SE TROMPER
-def find_col(keywords, default):
+# FONCTION CRUCIALÈ : Trouve la colonne même si le nom change un peu
+def find_column(keywords):
     for col in df.columns:
         if any(key.lower() in col.lower() for key in keywords):
             return col
-    return default
+    return None
 
-# Mapping automatique (Cherche le mot clé dans tes 18 colonnes)
-COL_NOM = find_col(["Dénomination", "Nom (FR)", "Sociale"], "Nom (FR) (Dénomination sociale)")
-COL_CA = find_col(["Chiffre d'affaires", "CA (M€)"], "CA (M€) (Chiffre d'affaires)")
-COL_EBITDA = find_col(["EBITDA", "Rentabilité"], "EBITDA (M€) (Rentabilité opérationnelle)")
-COL_DETTE = find_col(["Dette Financière", "Endettement"], "Dette Financière Brute (Endettement total)")
-COL_CASH = find_col(["Trésorerie", "Liquidités"], "Trésorerie (M€) (Liquidités)")
-COL_PRIO = find_col(["Priorité", "P1-P3"], "Priorité (P1-P3)")
-COL_ACTU = find_col(["Actualité", "News"], "Dernière Actualité (Signal faible / M&A / News)")
-COL_ESG = find_col(["Controverses", "ESG"], "Controverses (ESG) (Risques identifiés)")
-COL_ANGLE = find_col(["Angle d'Attaque", "Finance"], "Angle d'Attaque (Trade Finance, Refi, Acquisition Finance)")
-COL_ACCROCHE = find_col(["Accroche", "Ice breaker"], "Accroche Personnalisée (Ice breaker ciblé)")
+# MAPPING DYNAMIQUE (Ne dépend plus d'une chaîne exacte)
+C_NOM    = find_column(["Nom (FR)", "Dénomination", "Nom"])
+C_CA     = find_column(["CA (M€)", "Chiffre d'affaires", "CA"])
+C_EBITDA = find_column(["EBITDA", "Rentabilité", "Ebitda"])
+C_DETTE  = find_column(["Dette Financière", "Endettement", "Dette Brute"])
+C_CASH   = find_column(["Trésorerie", "Liquidités", "Cash"])
+C_PRIO   = find_column(["Priorité", "P1-P3"])
+C_ACTU   = find_column(["Actualité", "Signal faible", "News"])
+C_ESG    = find_column(["Controverses", "ESG", "Risques"])
+C_ANGLE  = find_column(["Angle", "Attaque", "Approche"])
+C_SECT   = find_column(["Secteur", "Industrie"])
+C_ACC    = find_column(["Accroche", "Ice breaker"])
 
-# --- 4. GESTION DU DÉBIT (6 RPM) ---
-if "last_request_time" not in st.session_state:
-    st.session_state.last_request_time = datetime.now() - timedelta(seconds=12)
+# Sécurité : Si la colonne Nom n'est pas trouvée, on affiche un guide de secours
+if not C_NOM:
+    st.error("❌ Impossible d'identifier la colonne 'Nom' dans votre fichier.")
+    st.write("Colonnes détectées :", df.columns.tolist())
+    st.stop()
 
-# --- 5. INTERFACE ---
-st.title("💼 CRM Prospection CIB - Christophe")
-st.caption(f"🤖 IA : `{selected_model_name}` | Mode : Deep Search Actif")
+# --- 4. GESTION DU DÉBIT (ANTI-429) ---
+if "last_req" not in st.session_state:
+    st.session_state.last_req = datetime.now() - timedelta(seconds=12)
+
+# --- 5. INTERFACE UTILISATEUR ---
+st.title("🚀 CRM CIB Intelligence - Christophe")
+st.caption(f"🤖 IA : `{selected_model}` | Grounding : Recherche Web 2026")
 
 with st.sidebar:
-    st.header("Paramètres")
-    search_query = st.text_input("🔍 Rechercher une société", "")
-    if st.button("♻️ Actualiser la base"):
+    st.header("Filtrage & Debug")
+    search = st.text_input("🔍 Rechercher une société", "")
+    if st.button("♻️ Forcer l'actualisation du Sheet"):
         st.cache_data.clear()
         st.rerun()
+    with st.expander("🛠️ Mapping des colonnes"):
+        st.write(f"Nom : `{C_NOM}`")
+        st.write(f"CA : `{C_CA}`")
+        st.write(f"Priorité : `{C_PRIO}`")
+
+# Filtrage du DataFrame
+mask = df[C_NOM].astype(str).str.contains(search, case=False, na=False)
+f_df = df[mask]
+
+# Tableau de bord principal
+st.subheader("📋 Pipeline de Prospection")
+st.dataframe(f_df[[C_NOM, C_PRIO, C_CA, C_SECT]], use_container_width=True, hide_index=True)
+
+if not f_df.empty:
     st.divider()
-    st.write("**Colonnes détectées :**")
-    st.write(df.columns.tolist())
-
-# Filtrage
-mask = df[COL_NOM].str.contains(search_query, case=False, na=False)
-filtered_df = df[mask]
-
-st.subheader("📋 Liste des cibles")
-st.dataframe(filtered_df[[COL_NOM, COL_PRIO, COL_CA]], use_container_width=True, hide_index=True)
-
-if not filtered_df.empty:
-    st.divider()
-    selected_target = st.selectbox("🎯 Sélectionner pour analyse :", filtered_df[COL_NOM].tolist())
-    idx = df[df[COL_NOM] == selected_target].index[0]
+    
+    # Sélection d'une société
+    target = st.selectbox("🎯 Sélectionner une cible :", f_df[C_NOM].tolist())
+    idx = df[df[C_NOM] == target].index[0]
     row = df.loc[idx]
 
     # --- 6. ÉDITION MANUELLE ---
-    st.subheader(f"📝 Gestion : {selected_target}")
-    c1, c2 = st.columns(2)
-    with c1:
-        p_list = ["P1", "P2", "P3"]
-        v_p = str(row.get(COL_PRIO, "P3")).strip()[:2].upper() # Extrait 'P1'
-        n_prio = st.selectbox("Priorité :", p_list, index=p_list.index(v_p) if v_p in p_list else 2)
-    with c2:
-        n_note = st.text_area("Notes / Accroche :", value=str(row.get(COL_ACCROCHE, "")))
+    st.subheader(f"📝 Gestion Commerciale : {target}")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        p_opts = ["P1", "P2", "P3"]
+        curr_p = str(row.get(C_PRIO, "P3"))[:2].upper()
+        n_prio = st.selectbox("Priorité :", p_opts, index=p_opts.index(curr_p) if curr_p in p_opts else 2)
 
-    if st.button("💾 Enregistrer"):
-        df.at[idx, COL_PRIO] = n_prio
-        df.at[idx, COL_ACCROCHE] = n_note
+    with col2:
+        n_note = st.text_area("Notes / Accroche :", value=str(row.get(C_ACC, "")))
+
+    if st.button("💾 Enregistrer les notes"):
+        df.at[idx, C_PRIO] = n_prio
+        df.at[idx, C_ACC] = n_note
         conn.update(worksheet="Prospection", data=df)
         st.cache_data.clear()
-        st.success("Enregistré !")
+        st.success("Données sauvegardées !")
         st.rerun()
 
     # --- 7. DEEP SEARCH IA (CA, EBITDA, DETTE, CASH) ---
     st.divider()
-    st.subheader("🤖 Deep Search : Extraction financière web")
+    st.subheader("🤖 Deep Search : Extraction financière en temps réel")
     
-    attente = max(0, 11.5 - (datetime.now() - st.session_state.last_request_time).total_seconds())
+    wait = max(0, 11.5 - (datetime.now() - st.session_state.last_req).total_seconds())
 
-    if st.button(f"🚀 Lancer la recherche financière pour {selected_target}"):
-        if attente > 0:
-            st.warning(f"⏳ Attendez {int(attente)}s.")
+    if st.button(f"🚀 Lancer l'analyse web pour {target}"):
+        if wait > 0:
+            st.warning(f"⏳ Quota 6 RPM : attendez {int(wait)}s.")
+        elif model is None:
+            st.error("IA non disponible.")
         else:
-            with st.status("Recherche web en cours...", expanded=True) as status:
-                st.session_state.last_request_time = datetime.now()
-                prompt = f"Expert CIB. Analyse {selected_target}. Trouve CA, EBITDA, Dette brute et Cash 2024. Réponds en JSON : {{'ca':0, 'ebitda':0, 'dette':0, 'cash':0, 'esg':'', 'actu':'', 'angle':''}}"
+            with st.status("Recherche web financière (Google Search)...", expanded=True) as status:
+                st.session_state.last_req = datetime.now()
+                
+                # Prompt chirurgical pour les chiffres financiers
+                prompt = f"""
+                Recherche les données financières 2024-2025 de {target} (Secteur: {row.get(C_SECT)}).
+                Réponds EXCLUSIVEMENT en JSON :
+                {{
+                    "ca": "CA en M€ (nombre)",
+                    "ebitda": "EBITDA en M€ (nombre)",
+                    "dette": "Dette brute en M€ (nombre)",
+                    "cash": "Trésorerie en M€ (nombre)",
+                    "esg": "Risques ESG (1 phrase)",
+                    "actu": "News financière majeure",
+                    "angle": "Conseil approche CIB"
+                }}
+                Si inconnu, mets 0.
+                """
+                
                 try:
-                    response = model.generate_content(prompt)
-                    res = json.loads(response.text[response.text.find('{'):response.text.rfind('}')+1])
+                    resp = model.generate_content(prompt)
+                    res = json.loads(resp.text[resp.text.find('{'):resp.text.rfind('}')+1])
                     
-                    # Mise à jour
-                    df.at[idx, COL_CA] = res.get('ca', row.get(COL_CA))
-                    df.at[idx, COL_EBITDA] = res.get('ebitda', row.get(COL_EBITDA))
-                    df.at[idx, COL_DETTE] = res.get('dette', row.get(COL_DETTE))
-                    df.at[idx, COL_CASH] = res.get('cash', row.get(COL_CASH))
-                    df.at[idx, COL_ESG] = res.get('esg', '')
-                    df.at[idx, COL_ACTU] = res.get('actu', '')
-                    df.at[idx, COL_ANGLE] = res.get('angle', '')
+                    # Injection dans le DataFrame (Écrase les valeurs vides)
+                    df.at[idx, C_CA] = res.get('ca', row[C_CA])
+                    df.at[idx, C_EBITDA] = res.get('ebitda', row[C_EBITDA])
+                    df.at[idx, C_DETTE] = res.get('dette', row[C_DETTE])
+                    df.at[idx, C_CASH] = res.get('cash', row[C_CASH])
+                    df.at[idx, C_ESG] = res.get('esg', '')
+                    df.at[idx, C_ACTU] = res.get('actu', '')
+                    df.at[idx, C_ANGLE] = res.get('angle', '')
                     
                     conn.update(worksheet="Prospection", data=df)
                     st.cache_data.clear()
-                    status.update(label="✅ Données trouvées !", state="complete")
+                    status.update(label="✅ Recherche web terminée et enregistrée !", state="complete")
                     st.rerun()
-                except Exception as e: st.error(f"Erreur : {e}")
+                except Exception as e:
+                    st.error(f"Erreur d'analyse : {e}")
 
-    # --- 8. FICHE FINALE ---
+    # --- 8. FICHE DE SYNTHÈSE QUALITATIVE ---
     st.divider()
-    st.subheader(f"🔍 Fiche Qualitative : {selected_target}")
+    st.subheader(f"🔍 Résultats de l'Intelligence Market : {target}")
+    
     f1, f2, f3 = st.columns(3)
+    
     with f1:
-        st.markdown("### 💰 Finances")
-        st.metric("CA", f"{row.get(COL_CA, '0')} M€")
-        st.metric("EBITDA", f"{row.get(COL_EBITDA, '0')} M€")
-        st.write(f"**Dette Brute :** {row.get(COL_DETTE, '0')} M€")
-        st.write(f"**Trésorerie :** {row.get(COL_CASH, '0')} M€")
+        st.markdown("### 💰 Finances (Live Search)")
+        st.metric("Chiffre d'Affaires", f"{row.get(C_CA, '0')} M€")
+        st.metric("EBITDA", f"{row.get(C_EBITDA, '0')} M€")
+        st.write(f"**Dette Brute :** {row.get(C_DETTE, '0')} M€")
+        st.write(f"**Trésorerie :** {row.get(C_CASH, '0')} M€")
+        if float(str(row.get(C_EBITDA, 0)).replace(',','.')) != 0:
+            levier = float(str(row.get(C_DETTE, 0)).replace(',','.')) / float(str(row.get(C_EBITDA, 1)).replace(',','.'))
+            st.write(f"**Levier estimé :** {levier:.2f}x")
+
     with f2:
-        st.markdown("### 🌍 Stratégie")
-        st.info(f"**ESG :** {row.get(COL_ESG, 'N/A')}")
+        st.markdown("### 🌍 Stratégie & ESG")
+        st.info(f"**Analyse ESG :** {row.get(C_ESG, 'N/A')}")
+        st.write(f"**Secteur :** {row.get(C_SECT, 'N/A')}")
+
     with f3:
-        st.markdown("### 🎯 Approche")
-        st.success(f"**Angle :** {row.get(COL_ANGLE, 'N/A')}")
+        st.markdown("### 🎯 Analyse Opportunité")
+        st.success(f"**Angle d'Attaque :** {row.get(C_ANGLE, 'À définir')}")
+        st.write(f"**Dernière News :** {row.get(C_ACTU, 'N/A')}")
+        st.write(f"**Priorité :** {row.get(C_PRIO, 'P3')}")
