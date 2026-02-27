@@ -4,95 +4,90 @@ import pandas as pd
 import google.generativeai as genai
 import json
 
-# Configuration
-st.set_page_config(page_title="CRM Prospection IA", layout="wide")
+st.set_page_config(page_title="Prospection Christophe CIB", layout="wide")
 
-# Configuration Gemini (à mettre dans vos Secrets sous le nom GEMINI_API_KEY)
+# --- INITIALISATION IA ---
+model = None
 if "GEMINI_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash')
-else:
-    st.error("Clé API Gemini manquante dans les Secrets.")
+    try:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        # Mise à jour vers le modèle 2.0 (plus stable en 2026)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+    except Exception as e:
+        st.error(f"Erreur configuration IA : {e}")
 
+# --- CONNEXION DONNÉES ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60) # Rafraîchissement toutes les minutes
 def load_data():
     df = conn.read(worksheet="Prospection")
     df.columns = [c.strip() for c in df.columns]
-    # Formatage 1 décimale pour les chiffres
-    for col in df.select_dtypes(include=['number']).columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce').round(1)
     return df.fillna("")
 
 df = load_data()
 
-# --- Interface ---
-st.title("💼 CRM Intelligence & Prospection")
+# --- INTERFACE ---
+st.title("💼 CRM Prospection & Intelligence")
 
-nom_col = "Nom de l'entité"
-search = st.sidebar.text_input("Rechercher une société", "")
+nom_col = "Nom (FR) (Dénomination sociale)" # Selon votre structure
+search = st.sidebar.text_input("🔍 Rechercher une société", "")
 mask = df[nom_col].str.contains(search, case=False, na=False)
 filtered_df = df[mask]
 
-# Tableau principal simplifié (vue d'ensemble)
-st.dataframe(filtered_df[[nom_col, "Priorité", "Statut Follow-up", "Secteur", "CA (M€)"]], 
-             use_container_width=True, hide_index=True)
+st.dataframe(filtered_df, use_container_width=True, hide_index=True)
 
 if not filtered_df.empty:
     st.divider()
-    selected_company = st.selectbox("Sélectionner pour analyse approfondie :", filtered_df[nom_col].tolist())
+    selected_company = st.selectbox("🎯 Sélectionner une société pour action :", filtered_df[nom_col].tolist())
     idx = df[df[nom_col] == selected_company].index[0]
     row = df.loc[idx]
 
-    # --- SECTION LISIBLE (Fiche de synthèse) ---
-    st.subheader(f"📑 Fiche de Synthèse : {selected_company}")
+    # --- SECTION 1 : ÉDITION MANUELLE (Statut et Commentaire) ---
+    st.subheader("📝 Mise à jour manuelle")
+    col_ed1, col_ed2 = st.columns(2)
     
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.info("**Données Financières**")
-        st.write(f"💰 **CA :** {row.get('CA (M€)', 'N/A')} M€")
-        st.write(f"📈 **EBITDA :** {row.get('EBITDA (M€)', 'N/A')} M€")
-        st.write(f"📉 **Levier :** {row.get('Levier (x)', 'N/A')}x")
-    
-    with col2:
-        st.info("**Qualitatif & ESG**")
-        st.write(f"🌿 **Stratégie ESG :** {row.get('Stratégie ESG', 'Non renseigné')}")
-        st.write(f"⚠️ **Controverses :** {row.get('Controverses', 'Aucune connue')}")
-    
-    with col3:
-        st.info("**Stratégie Commerciale**")
-        st.write(f"🎯 **Angle d'Attaque :** {row.get('Angle d\'Attaque', 'À définir')}")
-        st.write(f"🆕 **Dernière Actu :** {row.get('Actualité Récente', 'Aucune news')}")
+    with col_ed1:
+        # On définit les options de statut selon vos besoins
+        nouveau_statut = st.selectbox("Changer le statut :", 
+                                    ["À contacter", "En cours", "Opportunité", "Perdu", "Client"],
+                                    index=0) # Vous pouvez adapter l'index selon la valeur actuelle
+    with col_ed2:
+        nouveau_commentaire = st.text_area("Ajouter un commentaire / Accroche :", 
+                                          value=str(row.get('Accroche Personnalisée', '')))
 
-    # --- BOUTON ENRICHISSEMENT IA ---
-    st.write("---")
-    if st.button(f"🚀 Enrichir les données de {selected_company} via Gemini"):
-        with st.spinner("Analyse en cours..."):
-            prompt = f"""
-            Analyse la société {selected_company} opérant dans le secteur {row['Secteur']}.
-            Vérifie et suggère des mises à jour uniquement si elles sont pertinentes pour :
-            - Stratégie ESG
-            - Controverses (Risques identifiés)
-            - Dernière Actualité (Signal faible / M&A)
-            - Angle d'Attaque (Trade Finance, Refi, Acquisition Finance)
-            Donne une réponse précise. Si tu n'as pas de certitude, garde la valeur actuelle : "{row['Actualité Récente']}".
-            Format de sortie : JSON avec les clés 'esg', 'controverses', 'actu', 'angle'.
-            """
-            try:
-                response = model.generate_content(prompt)
-                # Extraction du JSON de la réponse
-                clean_res = response.text.replace('```json', '').replace('```', '').strip()
-                data_ai = json.loads(clean_res)
-                
-                # Mise à jour des données (seulement si l'utilisateur valide ensuite ou auto-save)
-                df.at[idx, 'Stratégie ESG'] = data_ai['esg']
-                df.at[idx, 'Controverses'] = data_ai['controverses']
-                df.at[idx, 'Actualité Récente'] = data_ai['actu']
-                df.at[idx, 'Angle d\'Attaque'] = data_ai['angle']
-                
-                conn.update(worksheet="Prospection", data=df)
-                st.success("✅ Données enrichies et synchronisées sur Google Sheets !")
-                st.rerun()
-            except Exception as e:
-                st.error("L'IA n'a pas pu structurer la réponse. Détails : " + str(e))
+    if st.button("💾 Enregistrer les modifications manuelles"):
+        df.at[idx, 'Priorité (P1-P3)'] = nouveau_statut # Ajustez le nom de la colonne
+        df.at[idx, 'Accroche Personnalisée'] = nouveau_commentaire
+        conn.update(worksheet="Prospection", data=df)
+        st.success("Données enregistrées dans Google Sheets !")
+        st.rerun()
+
+    # --- SECTION 2 : ENRICHISSEMENT IA ---
+    st.divider()
+    st.subheader("🤖 Analyse Intelligence Artificielle")
+    
+    if st.button(f"🚀 Lancer l'analyse IA pour {selected_company}"):
+        if model is None:
+            st.error("L'IA n'est pas configurée (Vérifiez votre clé dans les Secrets).")
+        else:
+            with st.spinner("Recherche de données certifiées..."):
+                prompt = f"""
+                Analyse {selected_company} (Secteur: {row.get('Secteur & Segment', 'N/A')}).
+                Sois factuel et certain. Si inconnu, écris 'Non confirmé'.
+                Donne un JSON avec : 'esg', 'controverses', 'actu', 'angle'.
+                """
+                try:
+                    response = model.generate_content(prompt)
+                    data_ai = json.loads(response.text.replace('```json', '').replace('```', '').strip())
+                    
+                    # Mise à jour des colonnes qualitatives
+                    df.at[idx, 'Controverses (ESG)'] = data_ai['controverses']
+                    df.at[idx, 'Dernière Actualité'] = data_ai['actu']
+                    df.at[idx, 'Angle d\'Attaque'] = data_ai['angle']
+                    
+                    conn.update(worksheet="Prospection", data=df)
+                    st.success("Analyse IA terminée et enregistrée !")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erreur IA : {e}")
